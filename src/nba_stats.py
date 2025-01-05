@@ -7,11 +7,11 @@ import watchtower
 from datetime import datetime
 from pythonjsonlogger import jsonlogger
 from dotenv import load_dotenv
+from decimal import Decimal
 
 # Load environment variables
 load_dotenv()
 
-# Set up logging
 def setup_logger():
     logger = logging.getLogger('NBAStatsPipeline')
     logger.setLevel(logging.INFO)
@@ -26,11 +26,11 @@ def setup_logger():
     console_handler.setFormatter(json_formatter)
     logger.addHandler(console_handler)
 
-    # CloudWatch handler
+    # CloudWatch handler (updated for newer version)
     try:
         cloudwatch_handler = watchtower.CloudWatchLogHandler(
-            log_group='NBAStatsPipeline',
-            log_stream=f'stats-collection-{datetime.now().strftime("%Y-%m-%d")}'
+            log_group_name='NBAStatsPipeline',
+            stream_name=f'stats-collection-{datetime.now().strftime("%Y-%m-%d")}'
         )
         cloudwatch_handler.setFormatter(json_formatter)
         logger.addHandler(cloudwatch_handler)
@@ -53,6 +53,71 @@ class NBAStatsPipeline:
                             'base_url': self.base_url,
                             'table_name': self.table_name
                         })
+
+    def convert_floats_to_decimals(self, item):
+        """Helper method to convert all float values to Decimals"""
+        if isinstance(item, float):
+            return Decimal(str(item))
+        elif isinstance(item, dict):
+            return {k: self.convert_floats_to_decimals(v) for k, v in item.items()}
+        elif isinstance(item, list):
+            return [self.convert_floats_to_decimals(v) for v in item]
+        return item
+
+    def setup_dynamodb_table(self):
+        """Set up DynamoDB table if it doesn't exist"""
+        try:
+            self.logger.info(f"Setting up DynamoDB table: {self.table_name}")
+            
+            # Create table if it doesn't exist
+            try:
+                table = self.dynamodb.create_table(
+                    TableName=self.table_name,
+                    KeySchema=[
+                        {
+                            'AttributeName': 'TeamID',
+                            'KeyType': 'HASH'  # Partition key
+                        },
+                        {
+                            'AttributeName': 'Timestamp',
+                            'KeyType': 'RANGE'  # Sort key
+                        }
+                    ],
+                    AttributeDefinitions=[
+                        {
+                            'AttributeName': 'TeamID',
+                            'AttributeType': 'N'  # Number
+                        },
+                        {
+                            'AttributeName': 'Timestamp',
+                            'AttributeType': 'S'  # String
+                        }
+                    ],
+                    ProvisionedThroughput={
+                        'ReadCapacityUnits': 5,
+                        'WriteCapacityUnits': 5
+                    }
+                )
+                
+                # Wait for table to be created
+                table.meta.client.get_waiter('table_exists').wait(
+                    TableName=self.table_name
+                )
+                self.logger.info(f"Created table {self.table_name}")
+                
+            except self.dynamodb.meta.client.exceptions.ResourceInUseException:
+                self.logger.info(f"Table {self.table_name} already exists")
+                table = self.dynamodb.Table(self.table_name)
+                
+            return table
+            
+        except Exception as e:
+            self.logger.error(f"Failed to set up DynamoDB table", 
+                            extra={
+                                'error': str(e),
+                                'table_name': self.table_name
+                            })
+            raise
 
     def fetch_player_stats(self, season="2024"):
         """Fetch player statistics from sportsdata.io"""
@@ -95,6 +160,54 @@ class NBAStatsPipeline:
                             })
             return None
 
+    def store_team_stats(self, stats_data):
+        """Store team statistics in DynamoDB"""
+        try:
+            table = self.dynamodb.Table(self.table_name)
+            timestamp = datetime.now().isoformat()
+            
+            self.logger.info("Starting batch write to DynamoDB")
+            
+            with table.batch_writer() as batch:
+                for team in stats_data:
+                    # Create base item
+                    team_item = {
+                        'TeamID': team['TeamID'],
+                        'Timestamp': timestamp,
+                        'TeamKey': team['Key'],
+                        'TeamName': f"{team['City']} {team['Name']}",
+                        'Conference': team['Conference'],
+                        'Division': team['Division'],
+                        'Stats': self.convert_floats_to_decimals({
+                            'Wins': team['Wins'],
+                            'Losses': team['Losses'],
+                            'Percentage': team['Percentage'],
+                            'PointsPerGameFor': team['PointsPerGameFor'],
+                            'PointsPerGameAgainst': team['PointsPerGameAgainst'],
+                            'HomeWins': team['HomeWins'],
+                            'HomeLosses': team['HomeLosses'],
+                            'AwayWins': team['AwayWins'],
+                            'AwayLosses': team['AwayLosses'],
+                            'LastTenWins': team['LastTenWins'],
+                            'LastTenLosses': team['LastTenLosses']
+                        }),
+                        'LastUpdated': datetime.now().isoformat()
+                    }
+                    
+                    self.logger.info(f"Storing data for team: {team_item['TeamName']}")
+                    batch.put_item(Item=team_item)
+                
+            self.logger.info("Successfully stored team stats", 
+                            extra={'teams_count': len(stats_data)})
+                            
+        except Exception as e:
+            self.logger.error("Failed to store team stats", 
+                             extra={
+                                 'error': str(e),
+                                 'error_type': type(e).__name__
+                             })
+            raise
+
 def main():
     try:
         pipeline = NBAStatsPipeline()
@@ -121,96 +234,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-def setup_dynamodb_table(self):
-    """Set up DynamoDB table if it doesn't exist"""
-    try:
-        self.logger.info(f"Setting up DynamoDB table: {self.table_name}")
-        
-        # Create table if it doesn't exist
-        try:
-            table = self.dynamodb.create_table(
-                TableName=self.table_name,
-                KeySchema=[
-                    {
-                        'AttributeName': 'TeamID',
-                        'KeyType': 'HASH'  # Partition key
-                    },
-                    {
-                        'AttributeName': 'Timestamp',
-                        'KeyType': 'RANGE'  # Sort key
-                    }
-                ],
-                AttributeDefinitions=[
-                    {
-                        'AttributeName': 'TeamID',
-                        'AttributeType': 'N'  # Number
-                    },
-                    {
-                        'AttributeName': 'Timestamp',
-                        'AttributeType': 'S'  # String
-                    }
-                ],
-                ProvisionedThroughput={
-                    'ReadCapacityUnits': 5,
-                    'WriteCapacityUnits': 5
-                }
-            )
-            
-            # Wait for table to be created
-            table.meta.client.get_waiter('table_exists').wait(
-                TableName=self.table_name
-            )
-            self.logger.info(f"Created table {self.table_name}")
-            
-        except self.dynamodb.meta.client.exceptions.ResourceInUseException:
-            self.logger.info(f"Table {self.table_name} already exists")
-            table = self.dynamodb.Table(self.table_name)
-            
-        return table
-        
-    except Exception as e:
-        self.logger.error(f"Failed to set up DynamoDB table", 
-                         extra={
-                             'error': str(e),
-                             'table_name': self.table_name
-                         })
-        raise
-
-def store_team_stats(self, stats_data):
-    """Store team statistics in DynamoDB"""
-    try:
-        table = self.dynamodb.Table(self.table_name)
-        timestamp = datetime.now().isoformat()
-        
-        self.logger.info("Starting batch write to DynamoDB")
-        
-        with table.batch_writer() as batch:
-            for team in stats_data:
-                # Add timestamp and clean data
-                team_item = {
-                    'TeamID': team['TeamID'],
-                    'Timestamp': timestamp,
-                    'TeamKey': team['Key'],
-                    'TeamName': f"{team['City']} {team['Name']}",
-                    'Conference': team['Conference'],
-                    'Division': team['Division'],
-                    'Wins': team['Wins'],
-                    'Losses': team['Losses'],
-                    'WinningPercentage': team['Percentage'],
-                    'LastUpdated': datetime.now().isoformat()
-                }
-                
-                batch.put_item(Item=team_item)
-                
-        self.logger.info("Successfully stored team stats", 
-                        extra={'teams_count': len(stats_data)})
-                        
-    except Exception as e:
-        self.logger.error("Failed to store team stats", 
-                         extra={
-                             'error': str(e),
-                             'error_type': type(e).__name__
-                         })
-        raise 
