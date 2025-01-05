@@ -99,11 +99,20 @@ def main():
     try:
         pipeline = NBAStatsPipeline()
         
-        print("Testing NBA Stats Pipeline...")
+        # Set up DynamoDB table
+        pipeline.setup_dynamodb_table()
+        
+        print("Fetching NBA Stats...")
         stats = pipeline.fetch_player_stats()
         
         if stats:
-            print(json.dumps(stats[:2], indent=2))  # Show first 2 teams only
+            # Store in DynamoDB
+            pipeline.store_team_stats(stats)
+            print("Successfully stored team stats in DynamoDB!")
+            
+            # Show sample of stored data
+            print("\nSample of stored data:")
+            print(json.dumps(stats[:2], indent=2))
         else:
             print("Failed to fetch stats")
 
@@ -112,3 +121,96 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def setup_dynamodb_table(self):
+    """Set up DynamoDB table if it doesn't exist"""
+    try:
+        self.logger.info(f"Setting up DynamoDB table: {self.table_name}")
+        
+        # Create table if it doesn't exist
+        try:
+            table = self.dynamodb.create_table(
+                TableName=self.table_name,
+                KeySchema=[
+                    {
+                        'AttributeName': 'TeamID',
+                        'KeyType': 'HASH'  # Partition key
+                    },
+                    {
+                        'AttributeName': 'Timestamp',
+                        'KeyType': 'RANGE'  # Sort key
+                    }
+                ],
+                AttributeDefinitions=[
+                    {
+                        'AttributeName': 'TeamID',
+                        'AttributeType': 'N'  # Number
+                    },
+                    {
+                        'AttributeName': 'Timestamp',
+                        'AttributeType': 'S'  # String
+                    }
+                ],
+                ProvisionedThroughput={
+                    'ReadCapacityUnits': 5,
+                    'WriteCapacityUnits': 5
+                }
+            )
+            
+            # Wait for table to be created
+            table.meta.client.get_waiter('table_exists').wait(
+                TableName=self.table_name
+            )
+            self.logger.info(f"Created table {self.table_name}")
+            
+        except self.dynamodb.meta.client.exceptions.ResourceInUseException:
+            self.logger.info(f"Table {self.table_name} already exists")
+            table = self.dynamodb.Table(self.table_name)
+            
+        return table
+        
+    except Exception as e:
+        self.logger.error(f"Failed to set up DynamoDB table", 
+                         extra={
+                             'error': str(e),
+                             'table_name': self.table_name
+                         })
+        raise
+
+def store_team_stats(self, stats_data):
+    """Store team statistics in DynamoDB"""
+    try:
+        table = self.dynamodb.Table(self.table_name)
+        timestamp = datetime.now().isoformat()
+        
+        self.logger.info("Starting batch write to DynamoDB")
+        
+        with table.batch_writer() as batch:
+            for team in stats_data:
+                # Add timestamp and clean data
+                team_item = {
+                    'TeamID': team['TeamID'],
+                    'Timestamp': timestamp,
+                    'TeamKey': team['Key'],
+                    'TeamName': f"{team['City']} {team['Name']}",
+                    'Conference': team['Conference'],
+                    'Division': team['Division'],
+                    'Wins': team['Wins'],
+                    'Losses': team['Losses'],
+                    'WinningPercentage': team['Percentage'],
+                    'LastUpdated': datetime.now().isoformat()
+                }
+                
+                batch.put_item(Item=team_item)
+                
+        self.logger.info("Successfully stored team stats", 
+                        extra={'teams_count': len(stats_data)})
+                        
+    except Exception as e:
+        self.logger.error("Failed to store team stats", 
+                         extra={
+                             'error': str(e),
+                             'error_type': type(e).__name__
+                         })
+        raise 
