@@ -1,4 +1,4 @@
-Day 2 of 30 Days DevOps Challenge: Building an NBA statistics pipeline using AWS.
+Day 4 of 30 Days DevOps Challenge: Building an NBA statistics pipeline using AWS.
 
 # NBA Stats Pipeline
 
